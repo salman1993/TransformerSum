@@ -1,4 +1,3 @@
-import os
 import logging
 import torch
 import numpy as np
@@ -6,7 +5,6 @@ import random
 import datasets as nlp
 from pytorch_lightning import Trainer
 from extractive import ExtractiveSummarizer
-from helpers import StepCheckpointCallback
 from argparse import ArgumentParser
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
@@ -32,22 +30,13 @@ def main(args):
 
     summarizer = ExtractiveSummarizer
 
-    if args.load_weights:
-        model = summarizer(hparams=args)
-        checkpoint = torch.load(
-            args.load_weights, map_location=lambda storage, loc: storage
-        )
-        model.load_state_dict(checkpoint["state_dict"])
-    elif args.load_from_checkpoint:
+    if args.load_from_checkpoint:
         model = summarizer.load_from_checkpoint(args.load_from_checkpoint)
         # The model is loaded with self.hparams.data_path set to the directory where the data
         # was located during training. When loading the model, it may be desired to change
         # the data path, which the below line accomplishes.
         if args.data_path:
             model.hparams.data_path = args.data_path
-        # Same as above but for `test_use_pyrouge`
-        if args.test_use_pyrouge:
-            model.hparams.test_use_pyrouge = args.test_use_pyrouge
     else:
         model = summarizer(hparams=args)
 
@@ -56,25 +45,15 @@ def main(args):
     args.callbacks = [lr_logger]
 
     if args.use_logger == "wandb":
-        wandb_logger = WandbLogger(project=args.wandb_project,)
+        wandb_logger = WandbLogger(
+            project=args.wandb_project, log_model=(not args.no_wandb_logger_log_model)
+        )
         args.logger = wandb_logger
-        if not args.no_wandb_logger_log_model:
-            import wandb
-
-            args.weights_save_path = wandb_logger.experiment.dir
-            checkpoint_glob = os.path.join(wandb_logger.experiment.dir, "*.ckpt")
-            wandb.save(checkpoint_glob)
 
     if args.use_custom_checkpoint_callback:
         args.checkpoint_callback = ModelCheckpoint(
-            filepath=args.weights_save_path, save_top_k=-1, period=1, verbose=True,
+            save_top_k=-1, period=1, verbose=True,
         )
-    if args.custom_checkpoint_every_n:
-        custom_checkpoint_callback = StepCheckpointCallback(
-            step_interval=args.custom_checkpoint_every_n,
-            save_path=args.weights_save_path,
-        )
-        args.callbacks.append(custom_checkpoint_callback)
 
     trainer = Trainer.from_argparse_args(args)
 
@@ -85,10 +64,6 @@ def main(args):
         new_lr = lr_finder.suggestion()
         logger.info("Recommended Learning Rate: %s", new_lr)
 
-    # remove `args.callbacks` if it exists so it does not get saved with the model (would result in crash)
-    if args.custom_checkpoint_every_n:
-        del args.callbacks
-
     if args.do_train:
         trainer.fit(model)
 
@@ -98,22 +73,7 @@ if __name__ == "__main__":
 
     # parametrize the network: general options
     parser.add_argument(
-        "--default_root_dir",
-        type=str,
-        help="Default path for logs and weights. To use this option with the `wandb` logger specify the `--no_wandb_logger_log_model` option.",
-    )
-    parser.add_argument(
-        "--weights_save_path",
-        type=str,
-        help="""Where to save weights if specified. Will override `--default_root_dir` for
-        checkpoints only. Use this if for whatever reason you need the checkpoints stored in
-        a different place than the logs written in `--default_root_dir`. This option will
-        override the save locations when using a custom checkpoint callback, such as those
-        created when using `--use_custom_checkpoint_callback or `--custom_checkpoint_every_n`.
-        If you are using the `wandb` logger, then you must also set `--no_wandb_logger_log_model`
-        when using this option. Model weights are saved with the wandb logs to be uploaded to
-        wandb.ai by default. Setting this option without setting `--no_wandb_logger_log_model`
-        effectively creates two save paths, which will crash the script.""",
+        "--default_root_dir", type=str, help="Default path for logs and weights.",
     )
     parser.add_argument(
         "--learning_rate",
@@ -250,18 +210,7 @@ if __name__ == "__main__":
         help="The wandb project to save training runs to if `--use_logger` is set to `wandb`.",
     )
     parser.add_argument(
-        "--gradient_checkpointing",
-        action="store_true",
-        help="Enable gradient checkpointing (save memory at the expense of a slower backward pass) for the word embedding model. More info: https://github.com/huggingface/transformers/pull/4659#issue-424841871",
-    )
-    parser.add_argument(
         "--do_train", action="store_true", help="Run the training procedure."
-    )
-    parser.add_argument(
-        "--load_weights",
-        default=False,
-        type=str,
-        help="Loads the model weights from a given checkpoint",
     )
     parser.add_argument(
         "--load_from_checkpoint",
@@ -280,18 +229,7 @@ if __name__ == "__main__":
         action="store_true",
         help="""Use the custom checkpointing callback specified in `main()` by
         `args.checkpoint_callback`. By default this custom callback saves the model every
-        epoch and never deletes the saved weights files. You can change the save path by
-        setting the `--weights_save_path` option.""",
-    )
-    parser.add_argument(
-        "--custom_checkpoint_every_n",
-        type=int,
-        default=None,
-        help="""The number of steps between additional checkpoints. By default checkpoints are saved
-        every epoch. Setting this value will save them every epoch and every N steps. This does not
-        use the same callback as `--use_custom_checkpoint_callback` but instead uses a different class
-        called `StepCheckpointCallback`. You can change the save path by setting the
-        `--weights_save_path` option.""",
+        epoch and never deletes the saved weights files.""",
     )
     parser.add_argument(
         "--no_wandb_logger_log_model",

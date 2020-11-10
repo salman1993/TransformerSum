@@ -24,14 +24,14 @@ from helpers import (
     generic_configure_optimizers,
 )
 
-logger = logging.getLogger(__name__)
-
 from transformers import (
     AutoConfig,
     AutoModel,
     AutoTokenizer,
 )
 from transformers.data.metrics import acc_and_f1
+
+logger = logging.getLogger(__name__)
 
 try:
     from transformers.modeling_auto import MODEL_MAPPING
@@ -66,9 +66,6 @@ class ExtractiveSummarizer(pl.LightningModule):
             hparams = Namespace(**hparams)
 
         # Set new parameters to defaults if they do not exist in the `hparams` Namespace
-        hparams.gradient_checkpointing = getattr(
-            hparams, "gradient_checkpointing", False
-        )
         hparams.tokenizer_no_use_fast = getattr(hparams, "tokenizer_no_use_fast", False)
 
         self.hparams = hparams
@@ -77,7 +74,6 @@ class ExtractiveSummarizer(pl.LightningModule):
         if not embedding_model_config:
             embedding_model_config = AutoConfig.from_pretrained(
                 hparams.model_name_or_path,
-                gradient_checkpointing=hparams.gradient_checkpointing,
             )
 
         self.word_embedding_model = AutoModel.from_config(embedding_model_config)
