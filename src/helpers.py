@@ -2,7 +2,6 @@ import os
 import json
 import gzip
 import logging
-import pytorch_lightning as pl
 import torch
 import torch_optimizer
 from functools import partial
@@ -38,41 +37,6 @@ def load_json(json_file):
             file_extension,
         )
     return documents, file_path
-
-
-class StepCheckpointCallback(pl.callbacks.base.Callback):
-    def __init__(
-        self, step_interval=1000, save_name="model", save_path=".", num_saves_to_keep=5
-    ):
-        super(StepCheckpointCallback, self).__init__()
-        self.step_interval = step_interval
-        self.save_name = save_name
-        self.save_path = save_path
-        self.num_saves_to_keep = num_saves_to_keep
-
-    def on_batch_end(self, trainer, pl_module):  # skipcq: PYL-W0613
-        # check if `step_interval` has passed and that the `global_step` is not 0
-        if (
-            trainer.global_step % self.step_interval == 0
-            and not trainer.global_step == 0
-        ):
-            logger.info(
-                "Saving model to %s.ckpt at step %i.",
-                self.save_path,
-                trainer.global_step,
-            )
-            final_save_location = os.path.join(
-                self.save_path,
-                (self.save_name + "." + str(trainer.global_step) + ".ckpt"),
-            )
-            trainer.save_checkpoint(final_save_location)
-            # remove previous saves
-            offset = self.step_interval * self.num_saves_to_keep
-            path_to_remove = (
-                self.save_name + "." + str(trainer.global_step - offset) + ".ckpt"
-            )
-            if os.path.isfile(path_to_remove):
-                os.remove(path_to_remove)
 
 
 def lr_lambda_func(current_step, num_warmup_steps, num_training_steps):

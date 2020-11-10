@@ -28,12 +28,10 @@ print(summary_sents2, "\n")
 
 
 rouge_metrics = ["rouge1", "rouge2", "rougeL", "rougeLsum"]
-rouge_scorer = rouge_scorer.RougeScorer(
-    rouge_metrics, use_stemmer=True
-)
+rouge_scorer = rouge_scorer.RougeScorer(rouge_metrics, use_stemmer=True)
 
-tgt = 'The quick brown fox jumps over the lazy dog'
-pred = 'The quick brown dog jumps on the log.'
+tgt = "The quick brown fox jumps over the lazy dog"
+pred = "The quick brown dog jumps on the log."
 
 scores = rouge_scorer.score(target=tgt, prediction=pred)
 print(scores)

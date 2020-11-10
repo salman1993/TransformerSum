@@ -515,7 +515,6 @@ class SentencesProcessor:
                 if token == segment_token_id:
                     current_segment_flag = not current_segment_flag
 
-
         if create_segment_ids == "sequential":
             current_segment = 0
             segment_ids = []
