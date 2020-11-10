@@ -6,7 +6,6 @@ import random
 import datasets as nlp
 from pytorch_lightning import Trainer
 from extractive import ExtractiveSummarizer
-from abstractive import AbstractiveSummarizer
 from helpers import StepCheckpointCallback
 from argparse import ArgumentParser
 from pytorch_lightning.loggers import WandbLogger
@@ -31,10 +30,7 @@ def main(args):
     if args.seed:
         set_seed(args.seed)
 
-    if args.mode == "abstractive":
-        summarizer = AbstractiveSummarizer
-    else:
-        summarizer = ExtractiveSummarizer
+    summarizer = ExtractiveSummarizer
 
     if args.load_weights:
         model = summarizer(hparams=args)
@@ -95,21 +91,12 @@ def main(args):
 
     if args.do_train:
         trainer.fit(model)
-    if args.do_test:
-        trainer.test(model)
 
 
 if __name__ == "__main__":
     parser = ArgumentParser(add_help=False)
 
     # parametrize the network: general options
-    parser.add_argument(
-        "--mode",
-        type=str,
-        default="extractive",
-        choices=["extractive", "abstractive"],
-        help="Extractive or abstractive summarization training. Default is 'extractive'.",
-    )
     parser.add_argument(
         "--default_root_dir",
         type=str,
@@ -118,14 +105,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--weights_save_path",
         type=str,
-        help="""Where to save weights if specified. Will override `--default_root_dir` for 
-        checkpoints only. Use this if for whatever reason you need the checkpoints stored in 
-        a different place than the logs written in `--default_root_dir`. This option will 
+        help="""Where to save weights if specified. Will override `--default_root_dir` for
+        checkpoints only. Use this if for whatever reason you need the checkpoints stored in
+        a different place than the logs written in `--default_root_dir`. This option will
         override the save locations when using a custom checkpoint callback, such as those
         created when using `--use_custom_checkpoint_callback or `--custom_checkpoint_every_n`.
         If you are using the `wandb` logger, then you must also set `--no_wandb_logger_log_model`
-        when using this option. Model weights are saved with the wandb logs to be uploaded to 
-        wandb.ai by default. Setting this option without setting `--no_wandb_logger_log_model` 
+        when using this option. Model weights are saved with the wandb logs to be uploaded to
+        wandb.ai by default. Setting this option without setting `--no_wandb_logger_log_model`
         effectively creates two save paths, which will crash the script.""",
     )
     parser.add_argument(
@@ -247,7 +234,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--val_check_interval",
         default=1.0,
-        help="How often within one training epoch to check the validation set. Can specify as float or int. Use float to check within a training epoch. Use int to check every n steps (batches)."
+        help="How often within one training epoch to check the validation set. Can specify as float or int. Use float to check within a training epoch. Use int to check every n steps (batches).",
     )
     parser.add_argument(
         "--use_logger",
@@ -271,9 +258,6 @@ if __name__ == "__main__":
         "--do_train", action="store_true", help="Run the training procedure."
     )
     parser.add_argument(
-        "--do_test", action="store_true", help="Run the testing procedure."
-    )
-    parser.add_argument(
         "--load_weights",
         default=False,
         type=str,
@@ -294,37 +278,25 @@ if __name__ == "__main__":
     parser.add_argument(
         "--use_custom_checkpoint_callback",
         action="store_true",
-        help="""Use the custom checkpointing callback specified in `main()` by 
-        `args.checkpoint_callback`. By default this custom callback saves the model every 
-        epoch and never deletes the saved weights files. You can change the save path by 
+        help="""Use the custom checkpointing callback specified in `main()` by
+        `args.checkpoint_callback`. By default this custom callback saves the model every
+        epoch and never deletes the saved weights files. You can change the save path by
         setting the `--weights_save_path` option.""",
     )
     parser.add_argument(
         "--custom_checkpoint_every_n",
         type=int,
         default=None,
-        help="""The number of steps between additional checkpoints. By default checkpoints are saved 
-        every epoch. Setting this value will save them every epoch and every N steps. This does not 
-        use the same callback as `--use_custom_checkpoint_callback` but instead uses a different class 
-        called `StepCheckpointCallback`. You can change the save path by setting the 
+        help="""The number of steps between additional checkpoints. By default checkpoints are saved
+        every epoch. Setting this value will save them every epoch and every N steps. This does not
+        use the same callback as `--use_custom_checkpoint_callback` but instead uses a different class
+        called `StepCheckpointCallback`. You can change the save path by setting the
         `--weights_save_path` option.""",
     )
     parser.add_argument(
         "--no_wandb_logger_log_model",
         action="store_true",
         help="Only applies when using the `wandb` logger. Set this argument to NOT save checkpoints in wandb directory to upload to W&B servers.",
-    )
-    parser.add_argument(
-        "--auto_scale_batch_size",
-        default=None,
-        type=str,
-        help="""Auto scaling of batch size may be enabled to find the largest batch size that fits 
-        into memory. Larger batch size often yields better estimates of gradients, but may also 
-        result in longer training time. Currently, this feature supports two modes 'power' scaling 
-        and 'binsearch' scaling. In 'power' scaling, starting from a batch size of 1 keeps doubling 
-        the batch size until an out-of-memory (OOM) error is encountered. Setting the argument to 
-        'binsearch' continues to finetune the batch size by performing a binary search. 'binsearch'
-        is the recommended option.""",
     )
     parser.add_argument(
         "--lr_find",
@@ -338,15 +310,7 @@ if __name__ == "__main__":
         "--optimizer_type",
         type=str,
         default="adam",
-        help="""Which optimizer to use: `adamw` (default), `ranger`, `qhadam`, `radam`, or `adabound`.""",
-    )
-    parser.add_argument(
-        "--ranger-k",
-        default=6,
-        type=int,
-        help="""Ranger (LookAhead) optimizer k value (default: 6). LookAhead keeps a single
-        extra copy of the weights, then lets the internalized ‘faster’ optimizer (for Ranger,
-        that’s RAdam) explore for 5 or 6 batches. The batch interval is specified via the k parameter.""",
+        help="""Which optimizer to use: `adamw` (default), `qhadam`, `radam`, or `adabound`.""",
     )
     parser.add_argument(
         "--warmup_steps",
@@ -360,14 +324,7 @@ if __name__ == "__main__":
         help="""Three options:
         1. `linear`: Use a linear schedule that inceases linearly over `--warmup_steps` to `--learning_rate` then decreases linearly for the rest of the training process.
         2. `onecycle`: Use the one cycle policy with a maximum learning rate of `--learning_rate`.
-        (default: False, don't use any scheduler)
-        3. `poly`: polynomial learning rate decay from `--learning_rate` to `--end_learning_rate`""",
-    )
-    parser.add_argument(
-        "--end_learning_rate",
-        default=2e-6,
-        type=float,
-        help="The ending learning rate when `--use_scheduler` is poly.",
+        (default: False, don't use any scheduler)""",
     )
     parser.add_argument("--weight_decay", default=1e-2, type=float)
     parser.add_argument(
@@ -381,10 +338,7 @@ if __name__ == "__main__":
 
     main_args = parser.parse_known_args()
 
-    if main_args[0].mode == "abstractive":
-        parser = AbstractiveSummarizer.add_model_specific_args(parser)
-    else:
-        parser = ExtractiveSummarizer.add_model_specific_args(parser)
+    parser = ExtractiveSummarizer.add_model_specific_args(parser)
 
     main_args = parser.parse_args()
 
@@ -400,4 +354,5 @@ if __name__ == "__main__":
     nlp.logging.set_verbosity(nlp.logging.WARNING)
 
     # Train
+    logger.info("Arguments: %s", main_args)
     main(main_args)

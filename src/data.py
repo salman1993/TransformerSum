@@ -284,7 +284,7 @@ class InputFeatures:
         # removes empty and NoneType properties from `self.__dict__`
         output = {}
         for key, value in _dict.items():
-            if value:
+            if value is not None:
                 output[key] = value
         return output
 
@@ -511,9 +511,10 @@ class SentencesProcessor:
             current_segment_flag = True
             segment_ids = []
             for token in input_ids:
+                segment_ids += [0 if current_segment_flag else 1]
                 if token == segment_token_id:
                     current_segment_flag = not current_segment_flag
-                segment_ids += [0 if current_segment_flag else 1]
+
 
         if create_segment_ids == "sequential":
             current_segment = 0

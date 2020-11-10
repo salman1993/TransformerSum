@@ -2,12 +2,12 @@ import os
 import sys
 import glob
 import logging
-import numpy as np
+from typing import List, Union
+import types
 from functools import partial
 from collections import OrderedDict
 from argparse import ArgumentParser, Namespace
 import pytorch_lightning as pl
-from rouge_score import rouge_scorer, scoring
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -21,8 +21,6 @@ from classifier import (
 )
 from helpers import (
     load_json,
-    block_trigrams,
-    test_rouge,
     generic_configure_optimizers,
 )
 
@@ -34,8 +32,6 @@ from transformers import (
     AutoTokenizer,
 )
 from transformers.data.metrics import acc_and_f1
-
-# CUSTOM_MODEL_CLASSES = ("longformer",)
 
 try:
     from transformers.modeling_auto import MODEL_MAPPING
@@ -54,31 +50,6 @@ except ImportError:
         )
         # + CUSTOM_MODEL_CLASSES
     )
-
-
-def longformer_modifier(final_dictionary):
-    """
-    Creates the ``global_attention_mask`` for the longformer. Tokens with global attention
-    attend to all other tokens, and all other tokens attend to them. This is important for
-    task-specific finetuning because it makes the model more flexible at representing the
-    task. For example, for classification, the `<s>` token should be given global attention.
-    For QA, all question tokens should also have global attention. For summarization,
-    global attention is given to all of the `<s>` (RoBERTa 'CLS' equivalent) tokens. Please
-    refer to the `Longformer paper <https://arxiv.org/abs/2004.05150>`_ for more details. Mask
-    values selected in ``[0, 1]``: ``0`` for local attention, ``1`` for global attention.
-    """
-    # `batch_size` is the number of attention masks (one mask per input sequence)
-    batch_size = len(final_dictionary["attention_mask"])
-    # `sequence_length` is the number of tokens for the first sequence in the batch
-    sequence_length = len(final_dictionary["attention_mask"][0])
-    # create `global_attention_mask` using the above details
-    global_attention_mask = torch.tensor([[0] * sequence_length] * batch_size)
-    # set the `sent_rep_token_ids` to 1, which is global attention
-    for idx, items in enumerate(final_dictionary["sent_rep_token_ids"]):
-        global_attention_mask[idx, items] = 1
-
-    final_dictionary["global_attention_mask"] = global_attention_mask
-    return final_dictionary
 
 
 class ExtractiveSummarizer(pl.LightningModule):
@@ -130,18 +101,7 @@ class ExtractiveSummarizer(pl.LightningModule):
             self.emd_model_frozen = True
             self.freeze_web_model()
 
-        if hparams.pooling_mode == "sent_rep_tokens":
-            self.pooling_model = Pooling(
-                sent_rep_tokens=True, mean_tokens=False, max_tokens=False
-            )
-        elif hparams.pooling_mode == "max_tokens":
-            self.pooling_model = Pooling(
-                sent_rep_tokens=False, mean_tokens=False, max_tokens=True
-            )
-        else:
-            self.pooling_model = Pooling(
-                sent_rep_tokens=False, mean_tokens=True, max_tokens=False
-            )
+        self.pooling_model = Pooling()
 
         # if a classifier object was passed when creating this model then store that as the `encoder`
         if classifier_obj:
@@ -279,8 +239,6 @@ class ExtractiveSummarizer(pl.LightningModule):
             word_vectors=word_vectors,
             sent_rep_token_ids=sent_rep_token_ids,
             sent_rep_mask=sent_rep_mask,
-            sent_lengths=sent_lengths,
-            sent_lengths_mask=sent_lengths_mask,
         )
 
         sent_scores = self.encoder(sents_vec, mask)
@@ -445,7 +403,8 @@ class ExtractiveSummarizer(pl.LightningModule):
 
         1. Load json file.
         2. Add each document in json file to ``SentencesProcessor`` defined in ``self.processor``, overwriting any previous data in the processor.
-        3. Run :meth:`data.SentencesProcessor.get_features` to save the extracted features to disk as a ``.pt`` file containing a pickled python list of dictionaries, which each dictionary contains the extracted features.
+        3. Run :meth:`data.SentencesProcessor.get_features` to save the extracted features to disk as a ``.pt``
+            file containing a pickled python list of dictionaries, which each dictionary contains the extracted features.
 
         Memory Usage Note: If sharding was turned off during the ``convert_to_extractive`` process
         then this function will run once, loading the entire dataset into memory to process
@@ -457,7 +416,6 @@ class ExtractiveSummarizer(pl.LightningModule):
         data_splits = [
             self.hparams.train_name,
             self.hparams.val_name,
-            self.hparams.test_name,
         ]
         for corpus_type in data_splits:
             # get the current list of dataset files. if preprocessing has already happened
@@ -472,26 +430,6 @@ class ExtractiveSummarizer(pl.LightningModule):
                 json_files = glob.glob(
                     os.path.join(self.hparams.data_path, "*" + corpus_type + ".*.json*")
                 )
-
-                if self.hparams.preprocess_resume:
-                    completed_files = [
-                        os.path.splitext(os.path.basename(i))[0] for i in dataset_files
-                    ]
-                    logger.info("Not Processing Shards: %s", completed_files)
-
-                    def remove_complete(doc):
-                        # if compression was enabled (files end in ".gz") then remove the ".gz"
-                        if doc.endswith(".gz"):
-                            doc = os.path.splitext(doc)[0]
-                        # remove the ".json" extension
-                        doc = os.path.splitext(os.path.basename(doc))[0]
-
-                        # remove the document if it was already processed
-                        if doc in completed_files:
-                            return False  # remove
-                        return True  # keep
-
-                    json_files = list(filter(remove_complete, json_files))
 
                 num_files = len(json_files)
 
@@ -540,16 +478,8 @@ class ExtractiveSummarizer(pl.LightningModule):
 
         self.datasets = datasets
 
-        # Create `pad_batch_collate` function
-        # If the model is a longformer then create the `global_attention_mask`
-        if self.hparams.model_type == "longformer":
-
-            self.pad_batch_collate = partial(
-                pad_batch_collate, modifier=longformer_modifier
-            )
-        else:
-            # default is to just use the normal `pad_batch_collate` function
-            self.pad_batch_collate = pad_batch_collate
+        # default is to just use the normal `pad_batch_collate` function
+        self.pad_batch_collate = pad_batch_collate
 
     def train_dataloader(self):
         """Create dataloader for training if it has not already been created."""
@@ -581,21 +511,6 @@ class ExtractiveSummarizer(pl.LightningModule):
         )
         return valid_dataloader
 
-    def test_dataloader(self):
-        """Create dataloader for testing."""
-        self.rouge_metrics = ["rouge1", "rouge2", "rougeL", "rougeLsum"]
-        self.rouge_scorer = rouge_scorer.RougeScorer(
-            self.rouge_metrics, use_stemmer=True
-        )
-        test_dataset = self.datasets[self.hparams.test_name]
-        test_dataloader = DataLoader(
-            test_dataset,
-            # sampler=test_sampler,
-            batch_size=self.hparams.batch_size,
-            collate_fn=self.pad_batch_collate,
-        )
-        return test_dataloader
-
     def configure_optimizers(self):
         """
         Configure the optimizers. Returns the optimizer and scheduler specified by
@@ -609,7 +524,8 @@ class ExtractiveSummarizer(pl.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):  # skipcq: PYL-W0613
-        """Training step: `PyTorch Lightning Documentation <https://pytorch-lightning.readthedocs.io/en/latest/api/pytorch_lightning.core.html#pytorch_lightning.core.LightningModule.training_step>`__"""
+        """Training step: `PyTorch Lightning Documentation
+        <https://pytorch-lightning.readthedocs.io/en/latest/api/pytorch_lightning.core.html#pytorch_lightning.core.LightningModule.training_step>`__"""
         # Get batch information
         labels = batch["labels"]
 
@@ -708,7 +624,8 @@ class ExtractiveSummarizer(pl.LightningModule):
 
     def validation_epoch_end(self, outputs):
         """
-        Called at the end of a validation epoch: `PyTorch Lightning Documentation <https://pytorch-lightning.readthedocs.io/en/latest/api/pytorch_lightning.core.html#pytorch_lightning.core.LightningModule.validation_epoch_end>`__
+        Called at the end of a validation epoch:
+        `PyTorch Lightning Documentation <https://pytorch-lightning.readthedocs.io/en/latest/api/pytorch_lightning.core.html#pytorch_lightning.core.LightningModule.validation_epoch_end>`__
         Finds the mean of all the metrics logged by :meth:`~extractive.ExtractiveSummarizer.validation_step`.
         """
         # Get the average loss and accuracy metrics over all evaluation runs
@@ -744,247 +661,52 @@ class ExtractiveSummarizer(pl.LightningModule):
 
         self.log("val_loss", loss_dict["val_" + self.hparams.loss_key])
 
-    def test_step(self, batch, batch_idx):
-        """
-        Test step: `PyTorch Lightning Documentation <https://pytorch-lightning.readthedocs.io/en/latest/api/pytorch_lightning.core.html#pytorch_lightning.core.LightningModule.test_step>`__
-        Similar to :meth:`~extractive.ExtractiveSummarizer.validation_step` in that in runs the inputs
-        through the model. However, this method also calculates the ROUGE scores for each example-summary
-        pair.
-        """
-        # Get batch information
-        labels = batch["labels"]
-        sources = batch["source"]
-        targets = batch["target"]
-
-        # delete labels, sources, and targets so now batch contains everything to be inputted into the model
-        del batch["labels"]
-        del batch["source"]
-        del batch["target"]
-
-        # Compute model forward
-        outputs, _ = self.forward(**batch)
-        outputs = torch.sigmoid(outputs)
-
-        # Compute accuracy metrics
-        y_hat = outputs.clone().detach()
-        y_hat[y_hat > 0.5] = 1
-        y_hat[y_hat <= 0.5] = 0
-        y_hat = torch.flatten(y_hat)
-        y_true = torch.flatten(labels)
-        result = acc_and_f1(
-            y_hat.detach().cpu().numpy(), y_true.float().detach().cpu().numpy()
-        )
-        acc = torch.tensor(result["acc"])
-        f1 = torch.tensor(result["f1"])
-        acc_f1 = torch.tensor(result["acc_and_f1"])
-
-        sorted_ids = (
-            torch.argsort(outputs, dim=1, descending=True).detach().cpu().numpy()
-        )
-        if self.hparams.test_id_method == "top_k":
-            selected_ids = sorted_ids  # [:, : self.hparams.test_k]
-        elif self.hparams.test_id_method == "greater_k":
-            # `indexes` is sorted by original sentence order (sentences that appear first in the
-            # original document are first in the summary)
-            # if none of the rankings for a sample are greater than `test_k` then the top 3
-            # sorted by ranking are used
-            indexes = np.argwhere(outputs.detach().cpu().numpy() > self.hparams.test_k)
-            selected_ids = [[] for _ in range(outputs.size(0))]
-            previous_index = -1
-            # if the final document did not have any values greater than `hparams.test_k`
-            # then set it to the -1 (the skip token checked below)
-            final_index = outputs.size(0) - 1
-            if indexes.size == 0 or indexes[-1, 0] != final_index:
-                indexes = np.append(indexes, [[final_index, -1]], axis=0)
-
-            for index, value in indexes:
-                # if the index has changed and is not one greater then the previous then
-                # index was skipped because no elements greater than k
-                if (index not in (previous_index, previous_index + 1)) or value == -1:
-                    # For the first time the above loop runs, `previous_index` is -1 because no
-                    # no index has been checked yet. The -1 is necessary to check if the 0th
-                    # index is skipped. But, if the 0th index is skipped then the values need to be
-                    # added to the 0th index, not the -1st, so 1 is added to `previous_index` to
-                    # make it 0.
-                    if previous_index == -1:
-                        previous_index += 1
-                    # multiple entires might have been skipped
-                    num_skipped = index - previous_index
-                    for idx in range(num_skipped):
-                        # the index was skipped so add the top three for that index
-                        selected_ids[previous_index + idx] = sorted_ids[
-                            previous_index + idx, :3
-                        ].tolist()
-                # current entry was marked as skip
-                if value == -1:
-                    selected_ids[index] = sorted_ids[index, :3].tolist()
-                else:
-                    selected_ids[index].append(value)
-                previous_index = index
-        else:
-            logger.error(
-                "%s is not a valid option for `--test_id_method`.",
-                self.hparams.test_id_method,
-            )
-
-        rouge_outputs = []
-        predictions = []
-        # get ROUGE scores for each (source, target) pair
-        for idx, (source, source_ids, target) in enumerate(
-            zip(sources, selected_ids, targets)
-        ):
-            current_prediction = []
-            for sent_idx, i in enumerate(source_ids):
-                if i >= len(source):
-                    logger.debug(
-                        "Only %i examples selected from document %i in batch %i. This is likely because some sentences received ranks so small they rounded to zero and a padding 'sentence' was randomly chosen.",
-                        sent_idx + 1,
-                        idx,
-                        batch_idx,
-                    )
-                    continue
-
-                candidate = source[i].strip()
-                # If trigram blocking is enabled and searching for matching trigrams finds no matches
-                # then add the candidate to the current prediction list.
-                # During the predicting process, Trigram Blocking is used to reduce redundancy. Given
-                # selected summary S and a candidate sentence c, we will skip c is there exists a
-                # trigram overlapping between c and S.
-                if (not self.hparams.no_test_block_trigrams) and (
-                    not block_trigrams(candidate, current_prediction)
-                ):
-                    current_prediction.append(candidate)
-
-                # If the testing method is "top_k" and correct number of sentences have been
-                # added then break the loop and stop adding sentences. If the testing method
-                # is "greater_k" then we will continue to add all the sentences from `selected_ids`
-                if (self.hparams.test_id_method == "top_k") and (
-                    len(current_prediction) >= self.hparams.test_k
-                ):
-                    break
-
-            # See this issue https://github.com/google-research/google-research/issues/168
-            # for info about the differences between `pyrouge` and `rouge-score`.
-            # Archive Link: https://web.archive.org/web/20200622205503/https://github.com/google-research/google-research/issues/168
-            if self.hparams.test_use_pyrouge:
-                # Convert `current_prediction` from list to string with a "<q>" between each
-                # item/sentence. In ROUGE 1.5.5 (`pyrouge`), a "\n" indicates sentence
-                # boundaries but the below "save_gold.txt" and "save_pred.txt" could not be
-                # created if each sentence had to be separated by a newline. Thus, each
-                # sentence is separated by a "<q>" token and is then converted to a newline
-                # in `helpers.test_rouge`.
-                current_prediction = "<q>".join(current_prediction)
-                predictions.append(current_prediction)
-            else:
-                # Convert `current_prediction` from list to string with a newline between each
-                # item/sentence. `rouge-score` splits sentences by newline.
-                current_prediction = "\n".join(current_prediction)
-                target = target.replace("<q>", "\n")
-                rouge_outputs.append(
-                    self.rouge_scorer.score(target, current_prediction)
-                )
-
-        if self.hparams.test_use_pyrouge:
-            with open("save_gold.txt", "a+") as save_gold, open(
-                "save_pred.txt", "a+"
-            ) as save_pred:
-                for i in enumerate(targets):
-                    save_gold.write(targets[i].strip() + "\n")
-                for i in enumerate(predictions):
-                    save_pred.write(predictions[i].strip() + "\n")
-
-        output = OrderedDict(
-            {
-                "test_acc": acc,
-                "test_f1": f1,
-                "test_acc_and_f1": acc_f1,
-                "rouge_scores": rouge_outputs,
-            }
-        )
-        return output
-
-    def test_epoch_end(self, outputs):
-        """
-        Called at the end of a testing epoch: `PyTorch Lightning Documentation <https://pytorch-lightning.readthedocs.io/en/latest/api/pytorch_lightning.core.html#pytorch_lightning.core.LightningModule.test_epoch_end>`__
-        Finds the mean of all the metrics logged by :meth:`~extractive.ExtractiveSummarizer.test_step`.
-        """
-        # Get the accuracy metrics over all testing runs
-        avg_test_acc = torch.stack([x["test_acc"] for x in outputs]).mean()
-        avg_test_f1 = torch.stack([x["test_f1"] for x in outputs]).mean()
-        avg_test_acc_and_f1 = torch.stack(
-            [x["test_acc_and_f1"] for x in outputs]
-        ).mean()
-
-        rouge_scores_log = {}
-
-        if self.hparams.test_use_pyrouge:
-            test_rouge("tmp", "save_pred.txt", "save_gold.txt")
-        else:
-            aggregator = scoring.BootstrapAggregator()
-
-            # In `outputs` there is an entry for each batch that was passwed through the
-            # `test_step()` function. For each batch a list containing the rouge scores
-            # for each example exists under the key "rouge_scores" in `batch_list`. Thus,
-            # the below list comprehension loops through the list of outputs and grabs the
-            # items stored under the "rouge_scores" key. Then it flattens the list of lists
-            # to a list of rouge score objects that can be added to the `aggregator`.
-            rouge_scores_list = [
-                rouge_score_set
-                for batch_list in outputs
-                for rouge_score_set in batch_list["rouge_scores"]
-            ]
-            for score in rouge_scores_list:
-                aggregator.add_scores(score)
-            # The aggregator returns a dictionary with keys coresponding to the rouge metric
-            # and values that are `AggregateScore` objects. Each `AggregateScore` object is a
-            # named tuple with a low, mid, and high value. Each value is a `Score` object, which
-            # is also a named tuple, that contains the precision, recall, and fmeasure values.
-            # For more info see the source code: https://github.com/google-research/google-research/blob/master/rouge/scoring.py
-            rouge_result = aggregator.aggregate()
-
-            for metric, value in rouge_result.items():
-                rouge_scores_log[metric + "-precision"] = value.mid.precision
-                rouge_scores_log[metric + "-recall"] = value.mid.recall
-                rouge_scores_log[metric + "-fmeasure"] = value.mid.fmeasure
-
-        # Generate logs
-        loss_dict = {
-            "test_acc": avg_test_acc,
-            "test_f1": avg_test_f1,
-            "avg_test_acc_and_f1": avg_test_acc_and_f1,
-        }
-
-        for name, value in loss_dict.items():
-            self.log(name, value, prog_bar=True)
-        for name, value in rouge_scores_log.items():
-            self.log(name, value, prog_bar=False)
-
-    def predict(self, input_text, raw_scores=False, num_summary_sentences=3):
-        """Summaries ``input_text`` using the model.
+    def predict_sentences(
+        self,
+        input_sentences: Union[List[str], types.GeneratorType],
+        raw_scores=False,
+        num_summary_sentences=3,
+        tokenized=False,
+    ):
+        """Summarizes ``input_sentences`` using the model.
 
         Args:
-            input_text (str): The text to be summarized.
-            raw_scores (bool, optional): Return a dictionary containing each sentence
+            input_sentences (list or generator): The sentences to be summarized as a
+                list or a generator of spacy Spans (``spacy.tokens.span.Span``), which
+                can be obtained by running ``nlp("input document").sents`` where
+                ``nlp`` is a spacy model with a sentencizer.
+            raw_scores (bool, optional): Return a list containing each sentence
                 and its corespoding score instead of the summary. Defaults to False.
             num_summary_sentences (int, optional): The number of sentences in the
                 output summary. This value specifies the number of top sentences to
                 select as the summary. Defaults to 3.
+            tokenized (bool, optional): If the input sentences are already tokenized
+                using spacy. If true, ``input_sentences`` should be a list of lists
+                where the outer list contains sentences and the inner lists contain
+                tokens. Defaults to False.
 
         Returns:
-            str: The summary text. If ``raw_scores`` is set then returns a dictionary
+            str: The summary text. If ``raw_scores`` is set then returns a list
             of input sentences and their corespoding scores.
         """
-        nlp = English()
-        sentencizer = nlp.create_pipe("sentencizer")
-        nlp.add_pipe(sentencizer)
-        doc = nlp(input_text)
-
         # Create source text.
         # Don't add periods when joining because that creates a space before the period.
-        src_txt = [
-            " ".join([token.text for token in sentence if str(token) != "."]) + "."
-            for sentence in doc.sents
-        ]
+        if tokenized:
+            src_txt = [
+                " ".join([token.text for token in sentence if str(token) != "."]) + "."
+                for sentence in input_sentences
+            ]
+        else:
+            # nlp = English()
+            # sentencizer = nlp.create_pipe("sentencizer")
+            # nlp.add_pipe(sentencizer)
+
+            # src_txt = [
+            #     " ".join([token.text for token in nlp(sentence) if str(token) != "."])
+            #     + "."
+            #     for sentence in input_sentences
+            # ]
+            src_txt = input_sentences
 
         input_ids = SentencesProcessor.get_input_ids(
             self.tokenizer,
@@ -1021,7 +743,7 @@ class ExtractiveSummarizer(pl.LightningModule):
         if raw_scores:
             # key=sentence
             # value=score
-            sent_scores = dict(zip(src_txt, outputs.tolist()[0]))
+            sent_scores = list(zip(src_txt, outputs.tolist()[0]))
             return sent_scores
 
         sorted_ids = (
@@ -1036,6 +758,33 @@ class ExtractiveSummarizer(pl.LightningModule):
             selected_sents.append(src_txt[i])
 
         return " ".join(selected_sents).strip()
+
+    def predict(self, input_text: str, raw_scores=False, num_summary_sentences=3):
+        """Summarizes ``input_text`` using the model.
+
+        Args:
+            input_text (str): The text to be summarized.
+            raw_scores (bool, optional): Return a list containing each sentence
+                and its corespoding score instead of the summary. Defaults to False.
+            num_summary_sentences (int, optional): The number of sentences in the
+                output summary. This value specifies the number of top sentences to
+                select as the summary. Defaults to 3.
+
+        Returns:
+            str: The summary text. If ``raw_scores`` is set then returns a list
+            of input sentences and their corespoding scores.
+        """
+        nlp = English()
+        sentencizer = nlp.create_pipe("sentencizer")
+        nlp.add_pipe(sentencizer)
+        doc = nlp(input_text)
+
+        return self.predict_sentences(
+            input_sentences=doc.sents,
+            raw_scores=raw_scores,
+            num_summary_sentences=num_summary_sentences,
+            tokenized=True,
+        )
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -1066,13 +815,6 @@ class ExtractiveSummarizer(pl.LightningModule):
         parser.add_argument("--num_threads", type=int, default=4)
         parser.add_argument("--processing_num_threads", type=int, default=2)
         parser.add_argument(
-            "--pooling_mode",
-            type=str,
-            default="sent_rep_tokens",
-            choices=["sent_rep_tokens", "mean_tokens", "max_tokens"],
-            help="How word vectors should be converted to sentence embeddings.",
-        )
-        parser.add_argument(
             "--num_frozen_steps",
             type=int,
             default=0,
@@ -1095,11 +837,6 @@ class ExtractiveSummarizer(pl.LightningModule):
             help="""Only preprocess and write the data to disk. Don't train model.
             This will force data to be preprocessed, even if it was already computed and
             is detected on disk, and any previous processed files will be overwritten.""",
-        )
-        parser.add_argument(
-            "--preprocess_resume",
-            action="store_true",
-            help='Resume preprocessing. `--only_preprocess` must be set in order to resume. Determines which files to process by finding the shards that do not have a coresponding ".pt" file in the data directory.',
         )
         parser.add_argument(
             "--create_token_type_ids",
@@ -1150,40 +887,6 @@ class ExtractiveSummarizer(pl.LightningModule):
             type=str,
             default="val",
             help="name for set of validation files on disk (for loading and saving)",
-        )
-        parser.add_argument(
-            "--test_name",
-            type=str,
-            default="test",
-            help="name for set of testing files on disk (for loading and saving)",
-        )
-        parser.add_argument(
-            "--test_id_method",
-            type=str,
-            default="top_k",
-            choices=["greater_k", "top_k"],
-            help="How to chose the top predictions from the model for ROUGE scores.",
-        )
-        parser.add_argument(
-            "--test_k",
-            type=float,
-            default=3,
-            help="The `k` parameter for the `--test_id_method`. Must be set if using the `greater_k` option. (default: 3)",
-        )
-        parser.add_argument(
-            "--no_test_block_trigrams",
-            action="store_true",
-            help="Disable trigram blocking when calculating ROUGE scores during testing. This will increase repetition and thus decrease accuracy.",
-        )
-        parser.add_argument(
-            "--test_use_pyrouge",
-            action="store_true",
-            help="""Use `pyrouge`, which is an interface to the official ROUGE software, instead of
-            the pure-python implementation provided by `rouge-score`. You must have the real ROUGE
-            package installed. More details about ROUGE 1.5.5 here: https://github.com/andersjo/pyrouge/tree/master/tools/ROUGE-1.5.5.
-            It is recommended to use this option for official scores. The `ROUGE-L` measurements
-            from `pyrouge` are equivalent to the `rougeLsum` measurements from the default
-            `rouge-score` package.""",
         )
         parser.add_argument(
             "--loss_key",
