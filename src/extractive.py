@@ -35,6 +35,8 @@ from transformers import (
 )
 from transformers.data.metrics import acc_and_f1
 
+from pytorch_lightning.core.decorators import auto_move_data
+
 # CUSTOM_MODEL_CLASSES = ("longformer",)
 
 try:
@@ -54,6 +56,11 @@ except ImportError:
         )
         # + CUSTOM_MODEL_CLASSES
     )
+
+
+nlp = English()
+sentencizer = nlp.create_pipe("sentencizer")
+nlp.add_pipe(sentencizer)
 
 
 def longformer_modifier(final_dictionary):
@@ -219,6 +226,8 @@ class ExtractiveSummarizer(pl.LightningModule):
         self.rouge_metrics = None
         self.rouge_scorer = None
 
+
+    @auto_move_data
     def forward(
         self,
         input_ids,
@@ -959,6 +968,7 @@ class ExtractiveSummarizer(pl.LightningModule):
         for name, value in rouge_scores_log.items():
             self.log(name, value, prog_bar=False)
 
+
     def predict(self, input_text, raw_scores=False, num_summary_sentences=3):
         """Summaries ``input_text`` using the model.
 
@@ -974,9 +984,6 @@ class ExtractiveSummarizer(pl.LightningModule):
             str: The summary text. If ``raw_scores`` is set then returns a dictionary
             of input sentences and their corespoding scores.
         """
-        nlp = English()
-        sentencizer = nlp.create_pipe("sentencizer")
-        nlp.add_pipe(sentencizer)
         doc = nlp(input_text)
 
         # Create source text.
