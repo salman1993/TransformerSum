@@ -284,7 +284,7 @@ class InputFeatures:
         # removes empty and NoneType properties from `self.__dict__`
         output = {}
         for key, value in _dict.items():
-            if value:
+            if value is not None:
                 output[key] = value
         return output
 
